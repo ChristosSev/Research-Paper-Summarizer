@@ -1,1 +1,1 @@
-# Research-Paper-Summarizer (...in progess...)
+# Research-Paper-Summarizer (In progress)
