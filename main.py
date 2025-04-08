@@ -1,7 +1,3 @@
-"""
-Main Flask application for research paper summarization.
-"""
-
 import os
 import uuid
 import json
@@ -14,6 +10,8 @@ from nltk.corpus import stopwords
 from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
 from keybert import KeyBERT
 import torch
+import warnings
+
 
 # Import our custom modules
 from paper_processor import PaperProcessor
@@ -44,6 +42,10 @@ try:
 except LookupError:
     print("Downloading NLTK stopwords data...")
     nltk.download('stopwords', quiet=True)
+
+warnings.filterwarnings("ignore")
+
+
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -174,7 +176,7 @@ def upload_file():
 
 @app.route('/results/<result_id>')
 def view_results(result_id):
-    """View the summarization results, including narrative and comprehensive summaries."""
+    """View the summarization results, ensuring no full text is included."""
     result_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{result_id}.json")
 
     if not os.path.exists(result_path):
@@ -186,9 +188,43 @@ def view_results(result_id):
         with open(result_path, 'r') as f:
             result = json.load(f)
 
+        # SAFETY CHECK: Make sure no field is longer than 2000 characters
+        max_field_length = 2000
+        for key, value in result.items():
+            if isinstance(value, str) and len(value) > max_field_length:
+                # Field is suspiciously long - truncate it
+                logger.warning(f"Truncating field {key} with length {len(value)}")
+                result[key] = value[:max_field_length - 3] + "..."
+
+        # Also check nested dictionaries like sections
+        if "sections" in result and isinstance(result["sections"], dict):
+            for section_key, section_value in result["sections"].items():
+                if isinstance(section_value, str) and len(section_value) > max_field_length:
+                    result["sections"][section_key] = section_value[:max_field_length - 3] + "..."
+
         # Generate enhanced narrative and comprehensive summaries
         narrative_summary = paper_processor.create_narrative_summary(result)
         comprehensive_summary = paper_processor.create_comprehensive_summary(result)
+
+        # SAFETY CHECK: Make sure narrative_summary doesn't contain full text
+        if isinstance(narrative_summary, dict):
+            for key, value in narrative_summary.items():
+                if isinstance(value, str) and len(value) > max_field_length:
+                    narrative_summary[key] = value[:max_field_length - 3] + "..."
+                elif isinstance(value, list):
+                    limited_items = []
+                    for item in value:
+                        if isinstance(item, str) and len(item) > max_field_length:
+                            limited_items.append(item[:max_field_length - 3] + "...")
+                        else:
+                            limited_items.append(item)
+                    narrative_summary[key] = limited_items
+
+        # SAFETY CHECK: Make sure comprehensive_summary doesn't contain full text
+        if isinstance(comprehensive_summary, str) and len(comprehensive_summary) > 10000:
+            logger.warning(f"Comprehensive summary too long: {len(comprehensive_summary)}")
+            # Take the first part only - should have the important content
+            comprehensive_summary = comprehensive_summary[:10000] + "..."
 
         # Format top 10 key concepts for display
         top_concepts = result.get("keywords", [])[:10]
@@ -201,26 +237,31 @@ def view_results(result_id):
         # Prepare data for the template - ONLY include summarized content, not full text
         template_data = {
             "title": result.get("title", "Untitled Document"),
-            "authors": result.get("authors", "Authors not specified"),
-            "institutions": result.get("institutions", "Institutions not specified"),
+            #"authors": result.get("authors", "Authors not specified"),
+            #"institutions": result.get("institutions", "Institutions not specified"),
             "key_concepts": top_concepts,
-            "executive_summary": result.get("executive_summary", "Summary not available"),
-            "problem_statement": result.get("problem_statement", "Problem statement not available"),
+            #"executive_summary": result.get("executive_summary", "Summary not available"),
+            #"problem_statement": result.get("problem_statement", "Problem statement not available"),
             "methodology": result.get("methodology", "Methodology not available"),
-            "findings": result.get("findings", "Findings not available"),
+            #"findings": result.get("findings", "Findings not available"),
             "conclusion": result.get("conclusion", "Conclusion not available"),
             "references": formatted_refs,
             "narrative_summary": narrative_summary,
-            "comprehensive_summary": comprehensive_summary
+            #"comprehensive_summary": comprehensive_summary
         }
 
         # IMPORTANT: Remove any full text fields to ensure we don't send the entire corpus
         if "text_extraction_success" in result:
             template_data["text_extraction_success"] = result["text_extraction_success"]
 
-        # Remove any sections dictionary that might contain full text
+        # CRITICAL: Remove any sections dictionary that might contain full text
         if "sections" in template_data:
             del template_data["sections"]
+
+        # Perform one final safety check on all fields
+        for key, value in template_data.items():
+            if isinstance(value, str) and len(value) > max_field_length:
+                template_data[key] = value[:max_field_length - 3] + "..."
 
         # Handle the format parameter to support both HTML and JSON responses
         format_param = request.args.get('format', 'html')
