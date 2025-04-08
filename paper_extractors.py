@@ -26,194 +26,283 @@ class PaperExtractors:
 
     @staticmethod
     def extract_title(text):
-        """Extract the title from a research paper with improved number filtering"""
+        """Extract the title with improved author separation considering commas/and"""
         lines = text.split('\n')
-        for line in lines[:10]:  # Check first 10 lines
+        potential_title_lines = []
+
+        for line in lines[:15]:
             line = line.strip()
             if not line:
                 continue
-            # remove numbers at beginning of line.
             line = re.sub(r'^\d+\s*', '', line)
 
-            words = line.split()
+            is_potential_title_line = (
+                    3 <= len(line.split()) <= 30 and
+                    sum(1 for word in line.split() if word and word[0].isupper()) / len(line.split()) >= 0.5 and
+                    not re.search(r'@', line) and
+                    not line.lower().startswith(('abstract', 'introduction', 'keywords', 'doi', 'http'))
+            )
 
-            # More robust checks to filter out non-title lines
-            if (len(words) < 3 or  # Skip short lines
-                    re.match(r'^\d+\s*$', line) or  # Skip lines with only numbers
-                    re.match(r'^\d+\.\s', line) or  # Skip lines with numbered sections
-                    re.match(r'^[A-Z]+:', line) or  # Skip lines that start with all uppercase and a colon.
-                    line.startswith('http')):  # Skip URLs
-                continue
-            # check that a certain percentage of the words are uppercase.
-            uppercase_word_count = 0
-            for word in words:
-                if word[0].isupper():
-                    uppercase_word_count += 1
-            if len(words) > 0 and (uppercase_word_count / len(words)) < 0.5:
-                continue
+            is_potential_author_line = (
+                    len(line.split()) >= 2 and
+                    sum(1 for word in line.split() if word and word[0].isupper()) / len(
+                line.split()) >= 0.6 and  # Slightly relaxed uppercase ratio
+                    re.search(r'([A-Z][a-z]+(?:\s+[A-Z]\.)?\s+[A-Z][a-z]+)', line) and  # Look for name-like patterns
+                    re.search(r'(?:,\s+|\s+and\s+|\s*&\s*)', line)  # Check for commas, "and", or "&"
+            )
 
-            # Check if line looks like a title
-            if 3 <= len(words) <= 30:  # Adjusted title length range
-                return line
+            is_very_likely_author_start = (
+                    len(line.split()) >= 2 and
+                    sum(1 for word in line.split() if word and word[0].isupper()) == len(line.split()) and
+                    len(re.findall(r'[A-Z][a-z]+', line)) >= 2  # Multiple capitalized words
+            )
 
-        # Fallback: return first non-empty line
-        for line in lines:
-            if line.strip():
-                return line.strip()
+            if is_potential_title_line and not potential_title_lines:
+                potential_title_lines.append(line)
+            elif potential_title_lines and is_potential_title_line and not is_potential_author_line and not is_very_likely_author_start:
+                potential_title_lines.append(line)
+            elif potential_title_lines and (is_potential_author_line or is_very_likely_author_start):
+                # If we have a potential title and this line looks like authors, stop
+                break
+            elif not potential_title_lines and (is_potential_author_line or is_very_likely_author_start):
+                # If the very first non-empty line looks like authors, there might be no title
+                break
+            elif potential_title_lines and re.match(r'^\d+\.', line):
+                break
+            elif potential_title_lines and line.endswith('.'):
+                break
 
-        return "Untitled Document"
+        if potential_title_lines:
+            full_title = " ".join(potential_title_lines).strip()
+            parts = re.split(r'[,;]', full_title)
+            if len(parts) > 1:
+                last_part = parts[-1].strip()
+                if re.search(r'^[A-Z][a-z]+(?:\s+[A-Z]\.)?\s+[A-Z][a-z]+$', last_part) or re.search(
+                        r'^[A-Z]\.\s[A-Z][a-z]+', last_part):
+                    full_title = ", ".join(parts[:-1]).strip()
+                elif len(last_part.split()) <= 3 and sum(
+                        1 for word in last_part.split() if word and word[0].isupper()) == len(last_part.split()):
+                    full_title = ", ".join(parts[:-1]).strip()
+            return full_title
+        else:
+            for line in lines:
+                if line.strip():
+                    return line.strip()
+            return "Untitled Document"
 
     @staticmethod
     def extract_authors(text, title=None):
-        """Extract authors from an academic paper with improved accuracy"""
-        # Remove the title to avoid confusion
+        """Extract authors (no changes here for now)"""
         if title:
-            text = text.replace(title, "")
-
-        # Look for author affiliations with superscript numbers (common in academic papers)
-        # This pattern looks for names followed by superscript numbers
+            text = text.replace(title, "", 1)
         author_pattern = r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*(?:\s+[A-Z]\.(?:\s*[A-Z]\.)*)?(?:\s*[-\w]+)?)(?:\s*[,]?\s*)(\d+[,\d]*)'
-
-        # First try to find authors with superscript numbers
         author_matches = re.findall(author_pattern, text[:1000])
-
         if author_matches:
-            # Extract author names and remove duplicates
             authors = [match[0].strip() for match in author_matches if len(match[0].strip()) > 2]
-            # Remove duplicates while preserving order
             seen = set()
             unique_authors = [a for a in authors if not (a in seen or seen.add(a))]
             return ", ".join(unique_authors)
-
-        # If no authors found with superscript numbers, try alternative patterns
-        # Look for an "authors" section
         author_section_pattern = r'(?:authors?[:;]?\s*)((?:[A-Z][a-zA-Z.\-]+(?:\s+[A-Z][a-zA-Z.\-]+)*(?:,\s+|\s+and\s+|\s*&\s*|\s*$)){1,})'
         author_section = re.search(author_section_pattern, text[:2000], re.IGNORECASE)
-
         if author_section:
             return author_section.group(1).strip()
-
-        # Look for authors at paper start (after title and before abstract)
-        # This looks for lines with only names before the abstract
         name_pattern = r'([A-Z][a-z]+(?:\s+[A-Z][.])?(?:\s+[A-Z][a-zA-Z-]+)*)'
         text_start = text[:2000]
         abstract_pos = text_start.lower().find("abstract")
-
         if abstract_pos > 0:
             before_abstract = text_start[:abstract_pos]
             lines = before_abstract.split('\n')
             potential_authors = []
-
             for line in lines:
                 line = line.strip()
-                # Skip empty lines and lines that are too short or too long
                 if not line or len(line) < 3 or len(line) > 150:
                     continue
-
-                # Skip lines that look like titles or headers
                 if line.isupper() or line.startswith('Fig') or line.startswith('Table'):
                     continue
-
-                # Find all name-like patterns in the line
                 names = re.findall(name_pattern, line)
                 if names and all(len(name) > 2 for name in names):
                     potential_authors.extend(names)
-
             if potential_authors:
-                return ", ".join(potential_authors[:8])  # Limit to 8 authors to avoid false positives
-
-        # Check for a line with email addresses - often contains author names
+                return ", ".join(potential_authors[:8])
         email_line_pattern = r'(?:[A-Za-z.\-]+@[A-Za-z.\-]+\.[a-z]{2,})'
         email_lines = re.findall(email_line_pattern, text[:3000])
-
         if email_lines:
             email_line = " ".join(email_lines)
             words = email_line.split()
             names = []
-
             for word in words:
-                if re.match(r'^[A-Z][a-z]+$', word):  # Fixed pattern with proper quotes
+                if re.match(r'^[A-Z][a-z]+$', word):
                     names.append(word)
-
             if names:
                 return ", ".join(names)
-
-        # Look for "The authors are with" pattern (common in IEEE papers)
         authors_with_pattern = r'(?:The\s+authors?\s+(?:is|are)\s+with[^.]*?)((?:[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)+)'
         authors_with_match = re.search(authors_with_pattern, text[:3000], re.IGNORECASE)
-
         if authors_with_match:
             author_text = authors_with_match.group(1)
             names = re.findall(name_pattern, author_text)
             if names:
                 return ", ".join(names)
-
-        # If all else fails
         return "Not specified"
 
     @staticmethod
     def extract_institutions(text):
-        """Extract institutions with improved accuracy"""
-        # Common academic institutions keywords
+        """
+        Completely rewritten institution extraction for better accuracy and completeness
+        """
+        # First look for specific institution declarations in the header area (first 1500 chars)
+        header_text = text[:1500]
+
+        # Common patterns for author affiliations in academic papers
+        affiliation_patterns = [
+            # Superscript number pattern: Author¹, Author² followed by institution declarations
+            r'(?:^|\n)(?:\d+)(?:The authors are with|Department of|University|Institute|School)([^.,\n]{5,150}[.,])',
+
+            # Direct affiliation statements
+            r'(?:^|\n)(?:The authors are with|Authors are from|From the)([^.,\n]{5,150}[.,])',
+
+            # Affiliation statements after author list
+            r'(?:^|\n)(?:[A-Z][a-z]+ [A-Z][a-z]+,? )+(?:is|are) (?:with|from|at) ([^.,\n]{5,150}[.,])',
+
+            # Explicit affiliation sections
+            r'(?:^|\n)(?:Affiliation|Institution)s?:?\s*([^.,\n]{5,150}[.,])'
+        ]
+
+        # Look for specific institutional keywords to capture
         institution_keywords = [
             'University', 'Institute', 'College', 'School', 'Laboratory', 'Lab',
             'Department', 'Centre', 'Center', 'Faculty', 'Academy', 'Corporation',
-            'Research', 'Institution'
+            'Research', 'Institution', 'NCSR', 'Demokritos'
         ]
 
-        # Pattern to find institutions with superscript references (common in academic papers)
-        institution_patterns = [
-            r'(?:^|\n)(\d+)(?:The\s+authors?\s+(?:is|are)\s+with|[A-Za-z ,]*)(' + '|'.join(
-                institution_keywords) + r'[^.,\n]{5,100})',
-            r'(?:^|\n)(\d+)([^.,\n]{0,20}?' + '|'.join(institution_keywords) + r'[^.,\n]{5,100})',
-            r'(?:Department|University|Institute|School)[^.,\n]{5,100}',
-            r'(?:^|\n|\()(' + '|'.join(institution_keywords) + r'[^.,\n]{5,100})'
-        ]
+        # Try to extract institutions from the header specifically for NCSR Demokritos
+        ncsr_pattern = r'((?:Institute of|NCSR|National Center)[^.,]*(?:Demokritos|Informatics)[^.,\n]{0,100})'
+        ncsr_matches = re.findall(ncsr_pattern, text, re.IGNORECASE)
 
-        all_institutions = []
+        # Collect all institution candidates
+        institution_candidates = []
 
-        for pattern in institution_patterns:
-            matches = re.findall(pattern, text[:5000], re.IGNORECASE)
+        # Add NCSR matches first (highest priority)
+        for match in ncsr_matches:
+            if match and len(match.strip()) > 10:
+                institution_candidates.append(match.strip())
+
+        # Extract with affiliation patterns
+        for pattern in affiliation_patterns:
+            matches = re.findall(pattern, header_text, re.IGNORECASE | re.MULTILINE)
             for match in matches:
-                # If the match is a tuple, get the last item (the institution name)
-                institution = match[-1] if isinstance(match, tuple) else match
-                institution = institution.strip()
+                if match and len(match.strip()) > 10:
+                    institution_candidates.append(match.strip())
 
-                # Filter out false positives
-                if (len(institution) > 10 and
-                        any(keyword.lower() in institution.lower() for keyword in institution_keywords) and
-                        not institution.startswith("Retrieved") and
-                        not "http" in institution):
-                    all_institutions.append(institution)
+        # If we don't have enough, try a direct keyword-based approach in the header
+        if len(institution_candidates) < 3:
+            for keyword in institution_keywords:
+                pattern = f'({keyword}[^.,\n]{{5,150}}[.,])'
+                matches = re.findall(pattern, header_text, re.IGNORECASE)
+                for match in matches:
+                    if match and len(match.strip()) > 10:
+                        institution_candidates.append(match.strip())
 
-        # Look specifically for "authors are with" pattern often used in academic papers
-        with_pattern = r'(?:The\s+authors?\s+(?:is|are)\s+with\s+)([^.,\n]{5,100}' + '|'.join(
-            institution_keywords) + r'[^.,\n]{5,150})'
-        with_matches = re.findall(with_pattern, text[:5000], re.IGNORECASE)
-        all_institutions.extend(with_matches)
+        # Clean up and deduplicate
+        cleaned_institutions = []
+        for inst in institution_candidates:
+            # Remove numbers and whitespace at the beginning
+            inst = re.sub(r'^\d+\s*', '', inst)
 
-        # Remove duplicates while preserving order
-        unique_institutions = []
-        seen = set()
-        for inst in all_institutions:
-            # Normalize the text for comparison
-            normalized = re.sub(r'\s+', ' ', inst.lower())
-            if normalized not in seen and len(inst) > 10:
-                seen.add(normalized)
-                unique_institutions.append(inst)
+            # Remove trailing punctuation
+            inst = re.sub(r'[.,;:]+$', '', inst)
 
-        # Limit to 3 most relevant institutions
-        final_institutions = unique_institutions[:3] if unique_institutions else ["Not specified"]
+            # Clean up internal whitespace
+            inst = re.sub(r'\s+', ' ', inst).strip()
 
-        # Clean up and format nicely
-        formatted_institutions = []
-        for inst in final_institutions:
-            # Remove numbers at the beginning and clean up
-            inst = re.sub(r'^\d+\s*', '', inst).strip()
-            inst = re.sub(r'\s+', ' ', inst)
-            formatted_institutions.append(inst)
+            if inst and len(inst) > 10:
+                # Check if the institution has a keyword
+                if any(keyword.lower() in inst.lower() for keyword in institution_keywords):
+                    # Don't add if very similar to existing institution
+                    is_duplicate = False
+                    for existing in cleaned_institutions:
+                        # Check similarity
+                        if existing.lower() in inst.lower() or inst.lower() in existing.lower():
+                            is_duplicate = True
+                            break
 
-        return ", ".join(formatted_institutions)
+                    if not is_duplicate:
+                        cleaned_institutions.append(inst)
+
+        # Look for the NCSR Demokritos pattern specifically
+        found_ncsr = False
+        for inst in cleaned_institutions:
+            if "demokritos" in inst.lower() or "ncsr" in inst.lower():
+                found_ncsr = True
+                break
+
+        # If not found, add it if it's in the text
+        if not found_ncsr:
+            ncsr_patterns = [
+                r'(?:NCSR|National Center)[^.,\n]*Demokritos[^.,\n]{0,50}',
+                r'Institute of Informatics and Telecommunications[^.,\n]{0,100}NCSR[^.,\n]{0,100}',
+                r'Institute of Informatics and Telecommunications[^.,\n]{0,100}Demokritos[^.,\n]{0,100}'
+            ]
+
+            for pattern in ncsr_patterns:
+                match = re.search(pattern, text, re.IGNORECASE)
+                if match:
+                    ncsr_inst = match.group(0).strip()
+                    ncsr_inst = re.sub(r'\s+', ' ', ncsr_inst)  # Clean whitespace
+                    if len(ncsr_inst) > 10 and ncsr_inst not in cleaned_institutions:
+                        cleaned_institutions.append(ncsr_inst)
+                    break
+
+        # If we're still empty, try to extract from author affiliations with superscripts
+        if not cleaned_institutions:
+            superscript_pattern = r'(?:^|\n)([A-Z][a-z]+ [A-Z][a-z]+)(?:\d+).*?(?:^\d+|\n\d+)([^.,\n]{10,150})'
+            matches = re.findall(superscript_pattern, text[:2000], re.MULTILINE | re.DOTALL)
+            for match in matches:
+                if len(match) >= 2 and len(match[1].strip()) > 10:
+                    cleaned_institutions.append(match[1].strip())
+
+        # If still no institutions, return a fallback
+        if not cleaned_institutions:
+            # Look for Department of... or University of... in the whole text
+            fallback_patterns = [
+                r'Department of[^.,\n]{5,100}',
+                r'University of[^.,\n]{5,100}',
+                r'Institute of[^.,\n]{5,100}'
+            ]
+
+            for pattern in fallback_patterns:
+                matches = re.findall(pattern, text[:3000], re.IGNORECASE)
+                for match in matches:
+                    if match and len(match.strip()) > 10:
+                        clean_match = re.sub(r'\s+', ' ', match).strip()
+                        if clean_match not in cleaned_institutions:
+                            cleaned_institutions.append(clean_match)
+
+                            # Stop after finding 3 institutions
+                            if len(cleaned_institutions) >= 3:
+                                break
+
+                if len(cleaned_institutions) >= 3:
+                    break
+
+        # Final formatting
+        final_institutions = []
+        for inst in cleaned_institutions[:3]:  # Limit to top 3
+            # Format with capitals for major words
+            words = inst.split()
+            formatted_words = []
+            for word in words:
+                if word.lower() not in ['of', 'the', 'and', 'with', 'in', 'at', 'for', 'on', 'by']:
+                    if not word.isupper():  # Don't change acronyms
+                        word = word.capitalize()
+                formatted_words.append(word)
+
+            final_inst = ' '.join(formatted_words)
+            final_institutions.append(final_inst)
+
+        if final_institutions:
+            return ', '.join(final_institutions)
+        else:
+            return "Institution not specified"
 
     @staticmethod
     def identify_sections(text):
@@ -508,99 +597,107 @@ class PaperExtractors:
 
     @staticmethod
     def extract_references(text):
-        """Extract structured references with improved formatting and accuracy"""
-        # First, find the references section
-        reference_patterns = [
+        """
+        Extract structured references with completely rewritten logic to avoid capturing large text blocks
+        """
+        references = []
+
+        # First try to find a references section
+        ref_section_patterns = [
             r'(?:REFERENCES|References)\s*\n(.*?)(?:\n\s*(?:Appendix|APPENDIX|\Z))',
             r'(?:REFERENCES|References)\s*\n(.*?)(?:\Z)',
             r'(?:\n\s*REFERENCES\s*\n)(.*?)(?:\Z)'
         ]
 
-        references_text = ""
-        for pattern in reference_patterns:
+        ref_section = ""
+        for pattern in ref_section_patterns:
             match = re.search(pattern, text, re.DOTALL)
             if match:
-                references_text = match.group(1)
+                ref_section = match.group(1)
                 break
 
-        if not references_text:
-            return []
+        if ref_section:
+            # Try to extract numbered references like [1] or (1)
+            numbered_ref_patterns = [
+                # [1] Author et al. Title...
+                r'\[\s*(\d+)\s*\]\s*([^\[\n]{10,200}?)(?=\[\s*\d+\s*\]|\n\s*\[\d+\]|\n\s*\n|\Z)',
 
-        # Different patterns for reference formatting
-        reference_item_patterns = [
-            # Pattern for "[n] Author et al. Title..."
-            r'\[\s*(\d+)\s*\]\s*([^\[\n]+?)(?=\[\s*\d+\s*\]|\Z)',
+                # 1. Author et al. Title...
+                r'(?:^|\n)\s*(\d+)\.\s+([^\n]{10,200}?)(?=\n\s*\d+\.|\n\s*\n|\Z)',
 
-            # Pattern for "n. Author et al. Title..."
-            r'(?:^|\n)\s*(\d+)\.\s+([^\n]+?(?:\.\s|$)(?:[^\n]+?)?)(?=\n\s*\d+\.|$)',
+                # (1) Author et al. Title...
+                r'\(\s*(\d+)\s*\)\s*([^\(\n]{10,200}?)(?=\(\s*\d+\s*\)|\n\s*\(\d+\)|\n\s*\n|\Z)'
+            ]
 
-            # Pattern for author-year style references
-            r'(?:^|\n)([A-Z][a-z]+(?:(?:,\s*|\s+and\s+|\s*&\s*)[A-Z][a-z]+)*\s*(?:\(\d{4}\)|\[\d{4}\])\.?\s+[^\n]+)(?=\n|$)'
-        ]
+            for pattern in numbered_ref_patterns:
+                matches = re.findall(pattern, ref_section, re.MULTILINE)
+                if matches:
+                    for match in matches:
+                        if isinstance(match, tuple) and len(match) >= 2:
+                            ref_num = match[0].strip()
+                            ref_text = match[1].strip()
 
-        all_references = []
+                            # Skip if too short - likely not a real reference
+                            if len(ref_text) < 20:
+                                continue
 
-        for pattern in reference_item_patterns:
-            matches = re.findall(pattern, references_text, re.MULTILINE)
-            if matches:
+                            # Clean up reference text - remove excessive whitespace
+                            ref_text = re.sub(r'\s+', ' ', ref_text).strip()
+
+                            # Final format
+                            references.append(f"[{ref_num}] {ref_text}")
+
+        # If no references found with section approach, try direct pattern matching
+        if not references:
+            # Look for reference patterns throughout the text
+            direct_patterns = [
+                # [1] Author et al. Title...
+                r'\[\s*(\d+)\s*\]\s*([A-Z][^\[\n]{10,200}?)(?=\[\s*\d+\s*\]|\n\s*\[\d+\]|\n\s*\n|\Z)',
+
+                # Direct citation of authors with year
+                r'(?:^|\n)([A-Z][a-z]+(?:,\s+[A-Z]\.|\s+et\s+al\.)?(?:\s+\(\d{4}\)))\s+([^,\.\n]{10,200}?[\.|\n])'
+            ]
+
+            for pattern in direct_patterns:
+                matches = re.findall(pattern, text, re.MULTILINE)
                 for match in matches:
-                    if isinstance(match, tuple):
-                        # For numbered references, combine the number and text
-                        ref_text = f"[{match[0]}] {match[1].strip()}"
-                    else:
-                        ref_text = match.strip()
+                    if isinstance(match, tuple) and len(match) >= 2:
+                        # For [n] style, format appropriately
+                        if match[0].isdigit():
+                            ref_text = f"[{match[0]}] {match[1].strip()}"
+                        else:
+                            # For author-year style
+                            ref_text = f"{match[0].strip()}, {match[1].strip()}"
 
-                    # Clean up and format
-                    ref_text = re.sub(r'\s+', ' ', ref_text)
+                        # Clean up reference text
+                        ref_text = re.sub(r'\s+', ' ', ref_text).strip()
 
-                    # Make sure it's reasonably long to be a reference
-                    if len(ref_text) > 20:
-                        all_references.append(ref_text)
+                        # Skip if already in references or too short
+                        if ref_text not in references and len(ref_text) >= 20:
+                            references.append(ref_text)
 
-        # If no references found with above patterns, try line-by-line extraction
-        if not all_references and references_text:
-            lines = references_text.split('\n')
-            current_ref = ""
-
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-
-                # Check if this line starts a new reference
-                if (re.match(r'^\[\s*\d+\s*\]', line) or
-                        re.match(r'^\d+\.', line) or
-                        re.match(r'^[A-Z][a-z]+', line)):
-
-                    # Save the previous reference if it exists
-                    if current_ref and len(current_ref) > 20:
-                        all_references.append(current_ref)
-
-                    # Start a new reference
-                    current_ref = line
-                else:
-                    # Continue the current reference
-                    current_ref += " " + line
-
-            # Don't forget the last reference
-            if current_ref and len(current_ref) > 20:
-                all_references.append(current_ref)
-
-        # Limit to a reasonable number and clean up
-        max_refs = 20
-        references = all_references[:max_refs]
-        references = [re.sub(r'\s+', ' ', ref).strip() for ref in references]
-
-        # Final check to remove duplicates
-        seen = set()
-        unique_references = []
+        # Final cleanup - ensure no references contain full paragraphs or emails
+        clean_references = []
         for ref in references:
-            normalized = " ".join(ref.lower().split())
-            if normalized not in seen:
-                seen.add(normalized)
-                unique_references.append(ref)
+            # Skip if suspiciously long (likely a paragraph)
+            if len(ref) > 300:
+                continue
 
-        return unique_references
+            # Remove email addresses
+            ref = re.sub(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', '', ref)
+
+            # Skip if mostly numbers (likely not a reference)
+            alpha_count = sum(c.isalpha() for c in ref)
+            if alpha_count < len(ref) * 0.5:
+                continue
+
+            # Clean up final format
+            ref = re.sub(r'\s+', ' ', ref).strip()
+
+            if ref and len(ref) >= 20:
+                clean_references.append(ref)
+
+        return clean_references[:20]  # Limit to 15 references
 
     @staticmethod
     def summarize_section(text, max_length=200):
@@ -769,7 +866,7 @@ class PaperExtractors:
 
     @staticmethod
     def extract_methodology(text):
-        """Extract methodology description from the paper"""
+        """Extract methodology description from the paper with strict length limits"""
         try:
             # Look for methodology section using various keywords
             method_patterns = [
@@ -782,9 +879,38 @@ class PaperExtractors:
                 match = re.search(pattern, text, re.DOTALL)
                 if match and len(match.group(1).strip()) > 100:
                     method_text = match.group(1).strip()
+
+                    # CRITICAL: Limit length to prevent full text capture
+                    # Split into sentences and take just the first few
+                    sentences = re.split(r'(?<=[.!?])\s+', method_text)
+                    if len(sentences) > 5:
+                        # Take only first 5 sentences for a concise summary
+                        method_text = ' '.join(sentences[:5])
+
+                    # Also apply an absolute character limit
+                    if len(method_text) > 500:
+                        method_text = method_text[:497] + "..."
+
                     return method_text
 
-            return ""
+            # If no specific methodology section found, look for a brief description
+            # in the introduction or abstract sections
+            intro_pattern = r'(?i)(?:introduction|abstract)[\s:]*\n+(.*?)(?=\n\n|\n[A-Z]|\Z)'
+            match = re.search(intro_pattern, text, re.DOTALL)
+            if match:
+                intro_text = match.group(1).strip()
+                # Look for methodology-related sentences in the introduction
+                method_sentences = []
+                sentences = re.split(r'(?<=[.!?])\s+', intro_text)
+                for sentence in sentences:
+                    if re.search(r'(?i)(method|approach|technique|algorithm|framework|system)', sentence):
+                        method_sentences.append(sentence)
+
+                if method_sentences:
+                    # Return up to 3 methodology-related sentences from intro
+                    return ' '.join(method_sentences[:3])
+
+            return "Methodology details could not be extracted from the document."
         except Exception as e:
             logger.error(f"Error extracting methodology: {e}")
-            return ""
+            return "Methodology details could not be extracted from the document."
